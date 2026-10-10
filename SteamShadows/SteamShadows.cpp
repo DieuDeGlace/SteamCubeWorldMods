@@ -19,7 +19,7 @@ static void log(const char* s){FILE* f=nullptr;fopen_s(&f,"Mods\\SteamShadows.lo
 static const GUID cacheGuid={0x89d60734,0xeda9,0x4bf0,{0xb0,0x61,0xc9,0x11,0x33,0x28,0x21,0x18}};
 static bool internal=false,enabled=true,finished=false,failed=false;
 static std::atomic<int> toggleRequest{0},captureRequest{0},disableRequest{0};
-static bool cloudShadows=true;
+static bool cloudShadows=true,softShadows=false;
 static UINT resolution=2048;static float radius=100,strength=.48f,bias=.00020f;
 static ID3D11Device* device=nullptr;static ID3D11DeviceContext* ctx=nullptr;static ID3D11DeviceContext1* ctx1=nullptr;
 static ID3DDeviceContextState* state=nullptr;static ID3D11VertexShader *caster=nullptr,*receiver=nullptr;
@@ -104,7 +104,7 @@ static bool lightMatrix(Params& p,const Draw& d){memcpy(p.view,d.view,64);memcpy
  }
  if(captureRequest.load()==2)sun=norm({.5f,.25f,.8f});Vec f{-sun.x,-sun.y,-sun.z};Vec r=norm(cross(f,fabsf(f.z)>.95f?Vec{0,1,0}:Vec{0,0,1})),u=cross(r,f);float snap=2*radius/resolution;
  float x=floorf(dot(r,eye)/snap+.5f)*snap,y=floorf(dot(u,eye)/snap+.5f)*snap;float span=cloudShadows?2048.f:512.f;float m[16]={r.x/radius,r.y/radius,r.z/radius,-x/radius,u.x/radius,u.y/radius,u.z/radius,-y/radius,f.x/span,f.y/span,f.z/span,.5f-dot(f,eye)/span,0,0,0,1};memcpy(p.light,m,64);
- p.eye[0]=eye.x;p.eye[1]=eye.y;p.eye[2]=eye.z;p.eye[3]=2.f/span;p.sun[0]=sun.x;p.sun[1]=sun.y;p.sun[2]=sun.z;p.sun[3]=0;p.config[0]=1.f/resolution;p.config[1]=activeStrength*fmaxf(0.f,fminf(1.f,sun.z/.15f));p.config[2]=bias;p.config[3]=radius;return std::isfinite(eye.x)&&std::isfinite(eye.y)&&std::isfinite(eye.z);}
+ p.eye[0]=eye.x;p.eye[1]=eye.y;p.eye[2]=eye.z;p.eye[3]=2.f/span;p.sun[0]=sun.x;p.sun[1]=sun.y;p.sun[2]=sun.z;p.sun[3]=softShadows?1.f:0.f;p.config[0]=1.f/resolution;p.config[1]=activeStrength*fmaxf(0.f,fminf(1.f,sun.z/.15f));p.config[2]=bias;p.config[3]=radius;return std::isfinite(eye.x)&&std::isfinite(eye.y)&&std::isfinite(eye.z);}
 static const char* hlsl=R"HLSL(
 cbuffer Params:register(b0){row_major float4x4 world,view,proj,light;float4 config,eye,sun;};
 struct V{float4 p:SV_POSITION;float3 w:TEXCOORD0;float3 n:TEXCOORD1;};
@@ -117,8 +117,11 @@ Texture2D<float> shadowMap:register(t0);SamplerComparisonState shadowSampler:reg
 float4 visibility(V i):SV_TARGET{float3 p=mul(light,float4(i.w,1)).xyz;float2 uv=float2(p.x,-p.y)*.5+.5;
  if(any(uv<config.x)||any(uv>1-config.x)||p.z<0||p.z>1)return 0;float facing=dot(normalize(i.n),sun.xyz);if(facing<=.025)return 0;
  float slope=sqrt(saturate(1-facing*facing))/max(facing,.05);float bias=max(config.z,config.x*config.w*eye.w*min(slope,8)*3);float lit=0;
- [unroll]for(int y=-1;y<=1;y++)[unroll]for(int x=-1;x<=1;x++)lit+=shadowMap.SampleCmpLevelZero(shadowSampler,uv+float2(x,y)*config.x,p.z-bias);
- float fade=1-smoothstep(config.w*.75,config.w,length(i.w.xy-eye.xy));return float4(0,0,0,(1-lit/9)*config.y*fade*saturate(facing*4));}
+ [branch]if(sun.w>.5){
+  [unroll]for(int y=-1;y<=1;y++)[unroll]for(int x=-1;x<=1;x++)lit+=shadowMap.SampleCmpLevelZero(shadowSampler,uv+float2(x,y)*config.x,p.z-bias);
+  lit/=9;
+ }else lit=shadowMap.SampleCmpLevelZero(shadowSampler,uv,p.z-bias);
+ float fade=1-smoothstep(config.w*.75,config.w,length(i.w.xy-eye.xy));return float4(0,0,0,(1-lit)*config.y*fade*saturate(facing*4));}
 )HLSL";
 static bool initialize(ID3D11DeviceContext* context){if(device)return ctx==context&&!failed;ctx=context;ctx->AddRef();ctx->GetDevice(&device);ID3D11Device1* d1=nullptr;
  bool ok=SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device1),(void**)&d1))&&SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1),(void**)&ctx1));D3D_FEATURE_LEVEL levels[]={device->GetFeatureLevel()};if(ok)ok=SUCCEEDED(d1->CreateDeviceContextState(0,levels,1,D3D11_SDK_VERSION,__uuidof(ID3D11Device),nullptr,&state));drop(d1);
@@ -218,7 +221,7 @@ static void STDMETHODCALLTYPE update(ID3D11DeviceContext* c,ID3D11Resource* r,UI
 static void STDMETHODCALLTYPE clear(ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT flags,FLOAT z,UINT8 stencil){if(!internal&&(!ctx||ctx==c)&&(flags&D3D11_CLEAR_DEPTH)){render();clearDraws();finished=false;if(toggleRequest.exchange(0)||GetAsyncKeyState(VK_F7)&1){enabled=!enabled;log(enabled?"Shadows enabled.":"Shadows disabled.");}if(disableRequest.exchange(0))enabled=false;}oldClear(c,v,flags,z,stencil);}
 static bool patch(void** slot,void* fn){DWORD old;if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&old))return false;InterlockedExchangePointer(slot,fn);DWORD unused;VirtualProtect(slot,sizeof(void*),old,&unused);return true;}
 static bool install(ID3D11DeviceContext* c){void** v=*(void***)c;if(table)return table==v;struct Hook{UINT slot;void* fn;void** original;};Hook hooks[]={{12,(void*)drawIndexed,(void**)&oldDI},{13,(void*)draw,(void**)&oldD},{14,(void*)map,(void**)&oldMap},{15,(void*)unmap,(void**)&oldUnmap},{48,(void*)update,(void**)&oldUpdate},{53,(void*)clear,(void**)&oldClear}};for(auto& h:hooks)*h.original=v[h.slot];int done=0;for(auto& h:hooks){if(!patch(v+h.slot,h.fn)){while(done--){auto& undo=hooks[done];patch(v+undo.slot,*undo.original);}return false;}done++;}table=v;log("D3D11 mesh capture hooks attached; F7 toggles shadows.");return true;}
-static DWORD attach(){cloudShadows=GetPrivateProfileIntW(L"Shadows",L"CloudShadows",1,L".\\Mods\\SteamShadows.ini")!=0;resolution=GetPrivateProfileIntW(L"Shadows",L"Resolution",2048,L".\\Mods\\SteamShadows.ini");resolution=resolution<512?512:resolution>4096?4096:resolution;radius=(float)GetPrivateProfileIntW(L"Shadows",L"Radius",100,L".\\Mods\\SteamShadows.ini");radius=radius<8?8:radius>128?128:radius;strength=GetPrivateProfileIntW(L"Shadows",L"StrengthPercent",48,L".\\Mods\\SteamShadows.ini")*.01f;strength=strength<0?0:strength>1?1:strength;
+static DWORD attach(){softShadows=GetPrivateProfileIntW(L"Shadows",L"SoftShadows",0,L".\\Mods\\SteamShadows.ini")!=0;cloudShadows=GetPrivateProfileIntW(L"Shadows",L"CloudShadows",1,L".\\Mods\\SteamShadows.ini")!=0;resolution=GetPrivateProfileIntW(L"Shadows",L"Resolution",2048,L".\\Mods\\SteamShadows.ini");resolution=resolution<512?512:resolution>4096?4096:resolution;radius=(float)GetPrivateProfileIntW(L"Shadows",L"Radius",100,L".\\Mods\\SteamShadows.ini");radius=radius<8?8:radius>128?128:radius;strength=GetPrivateProfileIntW(L"Shadows",L"StrengthPercent",48,L".\\Mods\\SteamShadows.ini")*.01f;strength=strength<0?0:strength>1?1:strength;
  ID3D11Device* d=nullptr;ID3D11DeviceContext* c=nullptr;HRESULT hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,nullptr,&c);bool ok=SUCCEEDED(hr)&&install(c);drop(c);drop(d);return ok?1:0;}
 }
 class SteamShadows:public GenericMod{public:void Initialize() override{shadows::attach();}void OnPresent(IDXGISwapChain*,UINT,UINT) override{shadows::render();shadows::commitClouds();shadows::clearDraws();shadows::frameOriginKnown=false;shadows::finished=false;}};
@@ -234,3 +237,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI DisableSteamShadows(void*){shadows
 extern "C" __declspec(dllexport) DWORD WINAPI CaptureSteamShadows(void*){shadows::captureLogged=false;shadows::captureRequest=1;return 1;}
 // One captured frame with a high sun, for validating the pass at dusk/night.
 extern "C" __declspec(dllexport) DWORD WINAPI PreviewSteamShadows(void*){shadows::captureLogged=false;shadows::captureRequest=2;return 1;}
+
+
+
+
