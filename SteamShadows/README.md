@@ -8,6 +8,8 @@ See [root build instructions](../README.md#build-on-windows-x64). Build only thi
 
 ## Crisp shadow edges
 
-`SoftShadows=0` is the new default: one hardware-filtered comparison sample instead of the old nine-tap blur. A narrow antialiased edge is retained. `SoftShadows=1` restores the previous softer nine-tap filter. Settings are read at startup. Resolution remains 2048 and radius remains 100 by default; no larger map or additional render pass is introduced. Texture sampling work is reduced, but this is not a measured overall FPS guarantee.
+`SoftShadows=0` is the new default: one hardware-filtered comparison sample instead of the old nine-tap blur. A narrow antialiased edge is retained. `SoftShadows=1` restores the previous softer nine-tap filter. Settings are read at startup. The supplied configuration now uses a 3072 shadow map and a 100-block radius; the code fallback when no configuration exists remains 2048. No additional render pass is introduced. Texture sampling work is reduced, but this is not a measured overall FPS guarantee.
 
 The graphics fixture measured an edge transition of 8 pixels versus 20 with the previous filter at the same map size. Shadow coverage and scene-target release checks passed, along with the other nine tests. The fixture deliberately uses a low-resolution map to expose filter width; these pixel counts do not describe normal gameplay. In-game sharpness, aliasing and performance still depend on camera, light angle and scene complexity.
+
+The 3072 preset improves shadow texel density by 50% over 2048 at the same radius. Its D32 map uses 36 MiB instead of 16 MiB, and has 2.25 times as many texels; caster fill work may increase. It retains single-sample hardware comparison filtering and texel snapping. This is a quality/performance compromise, not a measured FPS guarantee. Restore `Resolution=2048` if frame times worsen. SMAA/TAA are not added by this setting. Restart after changing resolution.
