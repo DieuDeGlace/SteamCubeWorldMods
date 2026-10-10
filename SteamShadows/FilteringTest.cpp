@@ -1,5 +1,6 @@
 #include "SteamShadows.cpp"
 #include <cassert>
+#include <array>
 static void STDMETHODCALLTYPE directDraw(ID3D11DeviceContext*c,UINT n,UINT s){c->Draw(n,s);}
 static void STDMETHODCALLTYPE directUpdate(ID3D11DeviceContext*c,ID3D11Resource*r,UINT s,const D3D11_BOX*b,const void*d,UINT row,UINT slice){c->UpdateSubresource(r,s,b,d,row,slice);}
 static void STDMETHODCALLTYPE directClear(ID3D11DeviceContext*c,ID3D11DepthStencilView*d,UINT f,FLOAT z,UINT8 s){c->ClearDepthStencilView(d,f,z,s);}
@@ -29,6 +30,29 @@ int main(){
  pixels=(unsigned char*)mapped.pData;int crisp=edgePixels(pixels,mapped.RowPitch);
  assert(pixels[256*mapped.RowPitch+256*4]<200);assert(pixels[256*mapped.RowPitch+168*4]>240);
  c->Unmap(staging,0);printf("Transition pixels: soft=%d crisp=%d\n",soft,crisp);assert(crisp<soft);
+
+ // Exercise actual receiver pixels against the existing caster depth map.
+ auto sampleLocal=[&](bool nativeLight,bool lantern){
+  c->ClearRenderTargetView(keptTarget,white);
+  shadows::Params params{};assert(shadows::lightMatrix(params,ground));
+  if(nativeLight){params.points[2]=5;params.points[3]=50;params.points[40]=params.points[41]=params.points[42]=1;}
+  if(lantern){params.lantern[2]=2;params.lantern[3]=12;}
+  ID3DDeviceContextState* old=nullptr;shadows::ctx1->SwapDeviceContextState(shadows::state,&old);
+  c->OMSetRenderTargets(1,&keptTarget,keptDepth);c->RSSetState(shadows::raster);c->RSSetViewports(1,&shadows::sceneViewport);
+  c->OMSetDepthStencilState(shadows::testDepth,0);c->OMSetBlendState(shadows::blend,nullptr,~0u);
+  c->VSSetShader(shadows::receiver,nullptr,0);c->PSSetShader(shadows::visibility,nullptr,0);
+  c->VSSetConstantBuffers(0,1,&shadows::constants);c->PSSetConstantBuffers(0,1,&shadows::constants);
+  c->PSSetShaderResources(0,1,&shadows::mapView);c->PSSetSamplers(0,1,&shadows::sampler);
+  shadows::bind(ground,params);
+  ID3D11ShaderResourceView* nullView=nullptr;c->PSSetShaderResources(0,1,&nullView);c->OMSetRenderTargets(0,nullptr,nullptr);
+  shadows::ctx1->SwapDeviceContextState(old,nullptr);shadows::drop(old);
+  c->CopyResource(staging,color);assert(SUCCEEDED(c->Map(staging,0,D3D11_MAP_READ,0,&mapped)));
+  auto pixel=(unsigned char*)mapped.pData+256*mapped.RowPitch+256*4;
+  std::array<int,3> result{pixel[0],pixel[1],pixel[2]};c->Unmap(staging,0);return result;
+ };
+ auto unlit=sampleLocal(false,false),local=sampleLocal(true,false),lantern=sampleLocal(false,true);
+ assert(local[0]>unlit[0]+20);assert(lantern[0]>unlit[0]+20);assert(lantern[0]>lantern[2]+15);
+ puts("Native point-light preservation and warm lantern fill in directional shadows: PASS");
  shadows::drop(keptTarget);shadows::drop(keptDepth);
  ID3DDeviceContextState*saved=nullptr;shadows::ctx1->SwapDeviceContextState(shadows::state,&saved);ID3D11RenderTargetView*parked=nullptr;ID3D11DepthStencilView*parkedDepth=nullptr;c->OMGetRenderTargets(1,&parked,&parkedDepth);assert(!parked&&!parkedDepth);shadows::ctx1->SwapDeviceContextState(saved,nullptr);shadows::drop(saved);
  shadows::clearClouds();shadows::drop(vb);shadows::drop(color);shadows::drop(depth);shadows::drop(staging);shadows::drop(c);shadows::drop(d);
