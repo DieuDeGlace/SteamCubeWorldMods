@@ -24,3 +24,15 @@ inline void cloud(float out[4],const float native[4],float weight,float nightSca
  for(int i=0;i<3;i++)out[i]*=1-weight+weight*nightScale*tint[i];
 }
 }
+
+namespace moonrules {
+struct ShadowCycle{float direction[3]{},strength=0;};
+inline ShadowCycle shadows(float milliseconds,float dayStrength,float nightStrength){
+ auto moon=state(milliseconds,nightStrength);ShadowCycle out;
+ bool day=moon.direction[2]<0;
+ for(int i=0;i<3;i++)out.direction[i]=day?-moon.direction[i]:moon.direction[i];
+ float horizon=smooth(out.direction[2]/.5f);
+ out.strength=day?dayStrength*horizon:nightStrength*moon.weight*horizon;
+ return out;
+}
+}

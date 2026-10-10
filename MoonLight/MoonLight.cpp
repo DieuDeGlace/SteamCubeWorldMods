@@ -37,7 +37,7 @@ static MoonState current(){
 return testPhase;
 #else
 auto g=nativeScene::game();auto s=enabled&&g&&g->world&&g->world->local_creature?moonrules::state(g->world->state.time,shadowStrength):MoonState{};
-if(sunKnown.load()){float x=-sunX.load(),y=-sunY.load(),z=-sunZ.load();float n=sqrtf(x*x+y*y+z*z);if(n>.001f){s.direction[0]=x/n;s.direction[1]=y/n;s.direction[2]=z/n;}}return s;
+return s;
 #endif
 }
 static UINT bytes(ID3D11Resource*r){ID3D11Buffer*b=nullptr;if(FAILED(r->QueryInterface(__uuidof(ID3D11Buffer),(void**)&b)))return 0;D3D11_BUFFER_DESC d{};b->GetDesc(&d);drop(b);return (d.BindFlags&D3D11_BIND_CONSTANT_BUFFER)&&d.ByteWidth<=64?d.ByteWidth:0;}
@@ -66,7 +66,7 @@ static bool initializeSky(){if(skyVS)return skyState&&skyPS&&skyConstants&&skyBl
  D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
  D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
  if(ok)ok=SUCCEEDED(device->CreateBlendState(&blend,&skyBlend))&&SUCCEEDED(device->CreateDepthStencilState(&depth,&skyDepth))&&SUCCEEDED(device->CreateRasterizerState(&raster,&skyRaster));
- log(ok?"Moon disk ready: opposite native sun, sky-depth occlusion, one triangle.":"Moon disk resources unavailable; lighting remains enabled.");return ok;
+ log(ok?"Moon disk ready: clock-driven sun/moon cycle, sky-depth occlusion, one triangle.":"Moon disk resources unavailable; lighting remains enabled.");return ok;
 }
 static bool moonDiskPosition(float disk[4],MoonState phase){float v[4]{},clip[4]{};for(int r=0;r<3;r++)for(int c=0;c<3;c++)v[r]+=sceneView[r*4+c]*phase.direction[c];
  for(int r=0;r<4;r++)for(int c=0;c<4;c++)clip[r]+=sceneProjection[r*4+c]*v[c];

@@ -105,10 +105,11 @@ memcpy(p.view,d.view,64);memcpy(p.proj,d.proj,64);
  // MoonLight shares this map rather than installing a second caster pass.
  auto moonModule=GetModuleHandleW(L"MoonLight.dll");MoonState moon{};
  auto query=moonModule?(BOOL(WINAPI*)(MoonState*))GetProcAddress(moonModule,"QueryMoonLight"):nullptr;
- if(query&&query(&moon)&&moon.version==1&&moon.weight>0){
-  sun=norm({moon.direction[0],moon.direction[1],moon.direction[2]});
-  activeStrength=moon.shadowStrength*moon.weight;
- }
+ bool moonEnabled=query&&query(&moon)&&moon.version==1;
+ if(g&&g->world&&g->world->local_creature){
+  auto cycle=moonrules::shadows(g->world->state.time,strength,moonEnabled?moon.shadowStrength:0.f);
+  sun=norm({cycle.direction[0],cycle.direction[1],cycle.direction[2]});activeStrength=cycle.strength;
+ }else if(moonEnabled){sun=norm({moon.direction[0],moon.direction[1],moon.direction[2]});activeStrength=moon.shadowStrength*moon.weight;}
  if(captureRequest.load()==2)sun=norm({.5f,.25f,.8f});Vec f{-sun.x,-sun.y,-sun.z};Vec r=norm(cross(f,fabsf(f.z)>.95f?Vec{0,1,0}:Vec{0,0,1})),u=cross(r,f);float snap=2*radius/resolution;
  float x=floorf(dot(r,eye)/snap+.5f)*snap,y=floorf(dot(u,eye)/snap+.5f)*snap;float span=cloudShadows?2048.f:512.f;float m[16]={r.x/radius,r.y/radius,r.z/radius,-x/radius,u.x/radius,u.y/radius,u.z/radius,-y/radius,f.x/span,f.y/span,f.z/span,.5f-dot(f,eye)/span,0,0,0,1};memcpy(p.light,m,64);
  p.eye[0]=eye.x;p.eye[1]=eye.y;p.eye[2]=eye.z;p.eye[3]=2.f/span;p.sun[0]=sun.x;p.sun[1]=sun.y;p.sun[2]=sun.z;p.sun[3]=softShadows?1.f:0.f;p.config[0]=1.f/resolution;p.config[1]=activeStrength*fmaxf(0.f,fminf(1.f,sun.z/.15f));p.config[2]=bias;p.config[3]=radius;return std::isfinite(eye.x)&&std::isfinite(eye.y)&&std::isfinite(eye.z);}
