@@ -1,0 +1,7 @@
+# WorldMotion
+
+Made with the aid of AI (OpenAI ChatGPT/Codex), by DieuDeGlace.
+
+Bounded cloud drift and gentle leaf motion using GPU buffers. Cloud speed is independently configurable; touching leaf corners are anchored to reduce seams. Forest performance remains a known limitation; motion can be disabled with F8.
+
+See [root build instructions](../README.md#build-on-windows-x64). Build only this mod with `cmake --build build --target WorldMotion` from the repository root. Output: `build/WorldMotion.dll`. Configuration: `Mods/WorldMotion.ini`. Close the game to install or remove hooks; restart after binary/config changes.
