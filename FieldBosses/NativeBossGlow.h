@@ -1,6 +1,5 @@
 #pragma once
 #include "cwsdk.h"
-#include <atomic>
 #include <cstring>
 #include <cstdint>
 #include "FieldBossRules.h"
@@ -8,17 +7,13 @@ namespace fieldglow {
 // Native light vector entries are 48 bytes. Only the RGB is changed.
 struct Light {int64_t position[3];float radius,color[3],distanceSquared;uint32_t padding;};
 static_assert(sizeof(Light)==48&&offsetof(Light,color)==28);
-static std::atomic<int64_t> ids[6]{};
 static bool installed=false;
 static void (*append)(void*,const Light*)=nullptr;
-inline void clear(){for(auto& id:ids)id.store(0,std::memory_order_relaxed);}
-inline bool managed(int64_t candidate){for(auto& id:ids)if(candidate&&id.load(std::memory_order_relaxed)==candidate)return true;return false;}
-static void submit(void* collector,const Light* input,int64_t id){
- if(managed(id)){
-  Light tinted=*input;fieldboss::purple(tinted.color);append(collector,&tinted);
- }else append(collector,input);
+static void glow(void* collector,const Light* input){
+ // This call site is exclusively the native named-boss light branch.
+ // Apply the same hue to native and promoted bosses across reloads.
+ Light tinted=*input;fieldboss::purple(tinted.color);append(collector,&tinted);
 }
-static void glow(void* collector,const Light* input,cube::Creature* creature){submit(collector,input,creature?creature->id:0);}
 inline bool initialize(){
  if(installed)return true;
  auto base=(uintptr_t)GetModuleHandleW(nullptr);auto site=(unsigned char*)(base+0xd1882);
@@ -35,12 +30,11 @@ inline bool initialize(){
   }
  }
  if(!relay)return false;
- // The native caller keeps its creature in r15. Forward it as argument 3.
- const unsigned char code[]={0x4d,0x89,0xf8,0xff,0x25,0,0,0,0};
- memcpy(relay,code,sizeof(code));auto target=(uintptr_t)&glow;memcpy(relay+9,&target,8);
+ const unsigned char code[]={0xff,0x25,0,0,0,0};
+ memcpy(relay,code,sizeof(code));auto target=(uintptr_t)&glow;memcpy(relay+6,&target,8);
  DWORD old;
  if(!VirtualProtect(relay,0x1000,PAGE_EXECUTE_READ,&old)){VirtualFree(relay,0,MEM_RELEASE);return false;}
- FlushInstructionCache(GetCurrentProcess(),relay,17);
+ FlushInstructionCache(GetCurrentProcess(),relay,14);
  intptr_t distance=(intptr_t)relay-(intptr_t)(site+5);
  if(distance<INT32_MIN||distance>INT32_MAX||!VirtualProtect(site,5,PAGE_EXECUTE_READWRITE,&old)){VirtualFree(relay,0,MEM_RELEASE);return false;}
  unsigned char call[5]={0xe8};int32_t rel=(int32_t)distance;memcpy(call+1,&rel,4);memcpy(site,call,5);

@@ -13,12 +13,11 @@ int main(){
  assert(fieldboss::withinRadius({-10000000,200},{-10000000,200},1));assert(!fieldboss::withinRadius({0,0},{300,0},256));
  float purple[3]{};fieldboss::purple(purple);assert(purple[0]==.6f&&purple[1]==.04f&&purple[2]==1.2f);
  fieldglow::Light original{{120,240,360},16,{.25f,.1f,.5f},420,0},output{};
- fieldglow::append=&capture;fieldglow::clear();fieldglow::ids[0].store(-8737452766389660863ll);
- fieldglow::submit(&output,&original,1001);assert(!memcmp(&output,&original,sizeof(original)));
- fieldglow::submit(&output,&original,-8737452766389660863ll);
+ fieldglow::append=&capture;
+ fieldglow::glow(&output,&original);
  assert(!memcmp(output.color,purple,sizeof(purple)));assert(original.color[0]==.25f);
  memcpy(output.color,original.color,sizeof(original.color));assert(!memcmp(&output,&original,sizeof(original)));
- fieldglow::clear();fieldglow::submit(&output,&original,-8737452766389660863ll);assert(!memcmp(&output,&original,sizeof(original)));
- puts("Managed light RGB only; native position/radius/sort key, other bosses and input preserved: PASS");
+ fieldglow::glow(&output,&original);assert(!memcmp(output.color,purple,sizeof(purple)));
+ puts("Native named-boss RGB remains consistent without tracked IDs; position/radius/sort key/input preserved: PASS");
  puts("Deterministic anchors/names, unsigned native IDs, hostile filtering, boss flags and purple RGB: PASS");
 }
