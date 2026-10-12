@@ -32,6 +32,14 @@ struct Active {
     char oldName[16];
 };
 static std::vector<Active> active;
+static bool eventCreature(uint64_t id) {
+    using Owns = int (*)(uint64_t);
+    static Owns owns = nullptr;
+    if (!owns)
+        if (auto module = GetModuleHandleW(L"OverworldEvents.dll"))
+            owns = reinterpret_cast<Owns>(GetProcAddress(module, "IsOverworldEventEntity"));
+    return owns && owns(id) != 0;
+}
 static uintptr_t base() {
     return (uintptr_t)GetModuleHandleW(nullptr);
 }
@@ -177,7 +185,8 @@ static void tick(cube::Game *g) {
             if (e.hostility_type != 1 || !fieldboss::nativeId(c->id) ||
                 (e.appearance.flags2 &
                  (fieldboss::Named | fieldboss::Boss | fieldboss::Mini | fieldboss::Friendly)) ||
-                e.HP <= 0 || e.current_ability || e.stun_time > 0)
+                e.HP <= 0 || e.current_ability || e.stun_time > 0 ||
+                eventCreature(static_cast<uint64_t>(c->id)))
                 continue;
             if (savedRace != -1 && e.race != (unsigned)savedRace)
                 continue;

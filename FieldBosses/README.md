@@ -8,4 +8,6 @@ Native named bosses and promoted field bosses use the native named-boss light wi
 
 Native creature IDs are treated as unsigned values even when the SDK exposes them as signed. This fixes eligible wild mobs with high-bit IDs being incorrectly excluded from field-boss promotion.
 
+The `test/overworld-events` integration branch optionally queries OverworldEvents ownership before selecting a promotion candidate. Its ordinary encounter enemies are excluded from promotion, preserving the event's enemy count and difficulty. When the event DLL is absent, existing field-boss selection remains unchanged. This integration was edited with AI assistance and requires native event playtesting.
+
 See [root build instructions](../README.md#build-on-windows-x64). Build only this mod with `cmake --build build --target FieldBosses` from the repository root. Output: `build/FieldBosses.dll`. Configuration: `Mods/FieldBosses.ini`. Close the game to install or remove hooks; restart after binary/config changes.
