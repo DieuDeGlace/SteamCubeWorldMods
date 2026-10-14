@@ -8,6 +8,19 @@ namespace lilies {
 constexpr unsigned FlowerModel = 44, PadModel = 45;
 constexpr unsigned CandidateCount = 40, MaximumPads = 32;
 constexpr int64_t Dots = 65536;
+// Native block types used by the water checks.
+constexpr int Air = 0, Water = 2;
+// Native biomes where lilies would look wrong: sea, frozen, mountain and
+// hostile lands.
+enum Biome : int {
+    Ocean = 1,
+    SnowForest = 6,
+    Mountains = 7,
+    Snowlands = 11,
+    Deadlands = 12,
+    Firelands = 13,
+    LastBiome = 13
+};
 struct Candidate {
     int64_t x = 0, y = 0;
     float scale = .06f, yaw = 0.f;
@@ -50,17 +63,51 @@ inline int64_t block(int64_t dots) {
     return dots / Dots - (dots < 0 && dots % Dots != 0);
 }
 inline bool inlandBiome(int biome) {
-    return biome >= 0 && biome <= 13 && biome != 1 && biome != 6 && biome != 7 && biome != 11 &&
-           biome != 12 && biome != 13;
+    switch (biome) {
+    case Ocean:
+    case SnowForest:
+    case Mountains:
+    case Snowlands:
+    case Deadlands:
+    case Firelands:
+        return false;
+    default:
+        return biome >= 0 && biome <= LastBiome;
+    }
 }
+// Memoizes one column's native block types. findSurface probes the same
+// heights several times (each candidate surface also checks the three blocks
+// above it and the floor below); every height is now looked up once.
+template <class Type> class CachedColumn {
+    static constexpr int Span = 48; // Covers findSurface's widest probe range.
+    Type type;
+    int low;
+    std::array<int16_t, Span> values;
+
+  public:
+    CachedColumn(Type lookup, int lowestZ) : type(lookup), low(lowestZ) {
+        values.fill(-1);
+    }
+    int operator()(int z) {
+        int index = z - low;
+        if (index < 0 || index >= Span)
+            return type(z);
+        auto &value = values[size_t(index)];
+        if (value < 0)
+            value = int16_t(type(z));
+        return value;
+    }
+};
 template <class Type>
 inline bool findSurface(int ground, unsigned maximumDepth, int &waterTop, Type type) {
     int depth = int(std::clamp(maximumDepth, 1u, 16u));
     // Native water can be implicit above voxel storage. The supplied native
     // getter remains authoritative, including TerrainVariance's water ceiling.
+    // Shallow, exposed water: a water top with three clear blocks above and a
+    // non-water floor within the allowed depth.
     for (int z = ground + depth + 2; z >= ground - 2; --z)
-        if (type(z) == 2 && type(z + 1) == 0 && type(z + 2) == 0 && type(z + 3) == 0 &&
-            type(z - depth) != 2) {
+        if (type(z) == Water && type(z + 1) == Air && type(z + 2) == Air && type(z + 3) == Air &&
+            type(z - depth) != Water) {
             waterTop = z;
             return true;
         }
@@ -69,8 +116,8 @@ inline bool findSurface(int ground, unsigned maximumDepth, int &waterTop, Type t
 template <class Type> inline bool footprint(int top, Type type) {
     for (int x = -1; x <= 1; ++x)
         for (int y = -1; y <= 1; ++y)
-            if (type(x, y, top) != 2 || type(x, y, top + 1) != 0 || type(x, y, top + 2) != 0 ||
-                type(x, y, top + 3) != 0)
+            if (type(x, y, top) != Water || type(x, y, top + 1) != Air ||
+                type(x, y, top + 2) != Air || type(x, y, top + 3) != Air)
                 return false;
     return true;
 }
