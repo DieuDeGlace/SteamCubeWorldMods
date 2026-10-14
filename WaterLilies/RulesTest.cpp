@@ -59,6 +59,27 @@ int main() {
     assert(!findSurface(-30, 10, top, [](int z) { return z <= -30 ? 1 : z <= 0 ? 2 : 0; }));
     assert(!findSurface(-4, 10, top, [](int z) { return z <= -4 ? 1 : z <= 0 ? 19 : 0; }));
     assert(!findSurface(-4, 10, top, [](int) { return 0; }));
+    // The column cache returns the same surface with each height looked up once.
+    for (int water : {-68, 0, 68})
+        for (unsigned maxDepth : {1u, 10u, 16u}) {
+            auto column = [water](int z) { return z <= water - 4 ? 1 : z <= water ? 2 : 0; };
+            unsigned lookups = 0;
+            std::vector<int> seen;
+            auto counted = [&](int z) {
+                ++lookups;
+                seen.push_back(z);
+                return column(z);
+            };
+            int plainTop = 0, cachedTop = 0;
+            bool plain = findSurface(water - 4, maxDepth, plainTop, column);
+            CachedColumn<decltype(counted)> cached(counted, water - 4 - 2 - int(maxDepth));
+            bool memo = findSurface(water - 4, maxDepth, cachedTop, cached);
+            assert(plain == memo && (!plain || plainTop == cachedTop));
+            for (size_t i = 0; i < seen.size(); ++i)
+                for (size_t j = i + 1; j < seen.size(); ++j)
+                    assert(seen[i] != seen[j]); // Every height queried at most once.
+            assert(lookups <= 2 * maxDepth + 8);
+        }
 
     // Run the production population loop against a relocating vector. Repeated
     // mesh builds preserve other decorations and cannot add the same pads twice.
