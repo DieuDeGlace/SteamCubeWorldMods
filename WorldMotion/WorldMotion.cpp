@@ -1,3 +1,15 @@
+// WorldMotion: wind-swayed leaves and drifting clouds for Cube World (Steam,
+// 64-bit, D3D11).
+//
+// Leaves: the first time a nearby terrain chunk is drawn its vertex buffer is
+// read back (asynchronously, never stalling) and every vertex of a leaf face is
+// marked, pinned where it touches a solid block. A GPU copy of the chunk is then
+// animated by a small compute shader (at most once per ~33 ms) and drawn in
+// place of the native buffer. The native voxel shader and lighting are kept.
+//
+// Clouds: draws of the cloud sprites get a slowly drifting world matrix.
+// SteamShadows reads the animated buffers (via private data) and the cloud
+// drift (QueryCloudDrift) so shadows match. F8 toggles motion.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "cwsdk.h"
@@ -25,6 +37,20 @@ static void log(const char *s) {
         fclose(f);
     }
 }
+
+// ===========================================================================
+// Constants and state
+// ===========================================================================
+
+// ID3D11DeviceContext vtable slots.
+constexpr UINT SLOT_DRAW_INDEXED = 12, SLOT_DRAW = 13, SLOT_MAP = 14, SLOT_UNMAP = 15,
+               SLOT_UPDATE_SUBRESOURCE = 48;
+// Vertex-shader constant buffer slots of a native world draw.
+constexpr UINT CB_PROJECTION = 0, CB_VIEW = 1, CB_WORLD = 2;
+constexpr size_t MAX_MESHES = 64, MAX_READBACKS = 2, MAX_BUILDS_PER_REFRESH = 2;
+constexpr UINT MAX_READBACK_BYTES = 2097152;
+constexpr unsigned long long EXPIRY_MS = 3000;
+
 using DI = void(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, UINT, UINT, INT);
 using D = void(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, UINT, UINT);
 using Map = HRESULT(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, ID3D11Resource *, UINT, D3D11_MAP,
@@ -35,6 +61,7 @@ using Update = void(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, ID3D11Resource *
 static Map oldMap;
 static Unmap oldUnmap;
 static Update oldUpdate;
+// Private-data key for the CPU copy of each constant buffer.
 static const GUID cbGuid = {
     0x753be3a7, 0x2f69, 0x4b97, {0x87, 0xf8, 0x11, 0x12, 0x39, 0xef, 0x6e, 0x94}};
 struct Mapped {
@@ -44,47 +71,69 @@ struct Mapped {
 static thread_local std::unordered_map<ID3D11Resource *, Mapped> mappedBuffers;
 static DI oldDI = nullptr;
 static D oldD = nullptr;
-static void **table = nullptr;
+static void **table = nullptr; // Hooked context vtable (set once attached).
 static thread_local bool internal = false;
+// Settings (see WorldMotion.ini).
 static bool enabled = true, leavesEnabled = true, cloudsEnabled = true;
 static float leafAmplitude = .16f, leafRange = 96.f, cloudDistance = 64.f, windSpeed = 1.f,
              cloudSpeed = 1.25f;
-static std::atomic<int> toggle{0};
-static unsigned long long origin = 0, refresh = 0, lastLog = 0;
+static std::atomic<int> toggle{0};                              // ToggleWorldMotion request.
+static unsigned long long origin = 0, refresh = 0, lastLog = 0; // origin: animation start tick.
+// Statistics.
 static unsigned built = 0, cloudDraws = 0, leafDraws = 0, leafVertices = 0;
 static cube::World *currentWorld = nullptr;
-static nativeScene::Chunks chunks;
+static nativeScene::Chunks chunks; // Terrain buffers within leafRange + 64.
 static ID3D11Device *device = nullptr;
 static ID3D11DeviceContext *context = nullptr;
-static ID3D11InputLayout *floatLayout = nullptr;
-static ID3D11Buffer *cloudMatrix = nullptr;
+static ID3D11InputLayout *floatLayout = nullptr; // float4 position + UNORM colour.
+static ID3D11Buffer *cloudMatrix = nullptr;      // Replacement world matrix for clouds.
 static ID3D11ComputeShader *leafCompute = nullptr;
 static ID3D11Buffer *windConstants = nullptr;
 struct WindParams {
-    float draw[4], phase[4];
-    unsigned count[4];
+    float draw[4];     // Chunk translation x/y, time, amplitude.
+    float phase[4];    // Chunk phase offsets, leaf range.
+    unsigned count[4]; // Number of leaf vertices.
 };
+
+// Animates the marked leaf vertices of one mesh in place. Each index is a
+// vertex number (top bit set = anchored, left still).
 static const char *leafCode = R"(
 cbuffer Wind:register(b0){float4 draw,phase;uint4 count;};
-RWByteAddressBuffer vertices:register(u0);StructuredBuffer<uint> indices:register(t0);
-[numthreads(64,1,1)]void main(uint3 id:SV_DispatchThreadID){if(id.x>=count.x)return;uint packed=indices[id.x];if(packed&0x80000000)return;uint address=(packed&0x7fffffff)*20;float2 xy=round(asfloat(vertices.Load2(address))*255);float fade=saturate((phase.z-length(draw.xy+xy))/32);float a=(packed&0x80000000)?0:draw.w*fade;float p=phase.x+dot(xy,float2(.035,.025)),d=phase.y+dot(xy,float2(.022,.014));float2 sway=float2(a*(.7*sin(draw.z*1.7+p)+.3*sin(draw.z*3.1+d)),a*.65*sin(draw.z*1.35+p+.8));vertices.Store2(address,asuint((xy+sway)/255));}
+RWByteAddressBuffer vertices:register(u0);
+StructuredBuffer<uint> indices:register(t0);
+[numthreads(64,1,1)]void main(uint3 id:SV_DispatchThreadID){
+    if(id.x>=count.x)return;
+    uint packed=indices[id.x];
+    if(packed&0x80000000)return;
+    uint address=(packed&0x7fffffff)*20;
+    float2 xy=round(asfloat(vertices.Load2(address))*255);
+    float fade=saturate((phase.z-length(draw.xy+xy))/32);
+    float a=(packed&0x80000000)?0:draw.w*fade;
+    float p=phase.x+dot(xy,float2(.035,.025)),d=phase.y+dot(xy,float2(.022,.014));
+    float2 sway=float2(a*(.7*sin(draw.z*1.7+p)+.3*sin(draw.z*3.1+d)),a*.65*sin(draw.z*1.35+p+.8));
+    vertices.Store2(address,asuint((xy+sway)/255));
+}
 )";
+
+// Vertex of our animated copy (native vertices are 8 bytes: UBYTE4 + colour).
 struct Vertex {
     float p[4];
     unsigned char color[4];
 };
 static_assert(sizeof(Vertex) == 20);
+
+// A terrain chunk and (if it has leaves) its animated GPU copy.
 struct Mesh {
     ID3D11Buffer *original = nullptr, *animated = nullptr, *indices = nullptr;
     ID3D11ShaderResourceView *indexView = nullptr;
     ID3D11UnorderedAccessView *vertexView = nullptr;
-    std::vector<Vertex> vertices;
-    std::vector<unsigned> leaves;
+    std::vector<Vertex> vertices; // Upload staging; freed after upload().
+    std::vector<unsigned> leaves; // Packed leaf vertex indices; freed after upload().
     size_t bytes = 0;
     UINT leafCount = 0;
     nativeScene::Chunk info;
     unsigned long long updated = 0, lastUsed = 0;
-    bool published = false;
+    bool published = false; // `animated` is attached to `original` for SteamShadows.
     ~Mesh() {
         if (original && published)
             original->SetPrivateDataInterface(nativeScene::animatedGuid, nullptr);
@@ -95,9 +144,11 @@ struct Mesh {
         drop(vertexView);
     }
 };
-static std::unordered_map<ID3D11Buffer *, std::unique_ptr<Mesh>> meshes;
+static std::unordered_map<ID3D11Buffer *, std::unique_ptr<Mesh>> meshes; // By native buffer.
 static size_t cacheBytes = 0;
 static constexpr size_t cacheLimit = 32 * 1024 * 1024;
+
+// An in-flight copy of a vertex buffer to CPU-readable memory.
 struct Readback {
     ID3D11Buffer *source = nullptr, *staging = nullptr;
     UINT bytes = 0;
@@ -109,6 +160,12 @@ struct Readback {
 };
 static std::unordered_map<ID3D11Buffer *, std::unique_ptr<Readback>> pending;
 static std::vector<unsigned char> read(ID3D11DeviceContext *, ID3D11Buffer *);
+
+// ===========================================================================
+// Buffer access
+// ===========================================================================
+
+// Size of `r` if it is a constant buffer of at most 512 bytes, otherwise 0.
 static UINT constantSize(ID3D11Resource *r) {
     ID3D11Buffer *b = nullptr;
     if (FAILED(r->QueryInterface(__uuidof(ID3D11Buffer), (void **)&b)))
@@ -118,12 +175,15 @@ static UINT constantSize(ID3D11Resource *r) {
     b->Release();
     return (d.BindFlags & D3D11_BIND_CONSTANT_BUFFER) && d.ByteWidth <= 512 ? d.ByteWidth : 0;
 }
+// Reads a 4x4 matrix from the CPU copy of a constant buffer.
 static bool readConstant(ID3D11DeviceContext *, ID3D11Buffer *b, float *out) {
     if (!b)
         return false;
     UINT size = 64;
     return SUCCEEDED(b->GetPrivateData(cbGuid, &size, out)) && size == 64;
 }
+// Nonblocking vertex-buffer readback. The first call queues a GPU copy and
+// returns nothing; a later call returns the bytes once the copy has finished.
 static std::vector<unsigned char> read(ID3D11DeviceContext *c, ID3D11Buffer *b) {
     std::vector<unsigned char> out;
     if (!b)
@@ -131,11 +191,11 @@ static std::vector<unsigned char> read(ID3D11DeviceContext *c, ID3D11Buffer *b) 
     auto found = pending.find(b);
     if (found == pending.end()) {
         // Queue a copy, then let native rendering proceed. Never wait for its GPU completion.
-        if (pending.size() >= 2)
+        if (pending.size() >= MAX_READBACKS)
             return out;
         D3D11_BUFFER_DESC desc{};
         b->GetDesc(&desc);
-        if (desc.ByteWidth > 2097152)
+        if (desc.ByteWidth > MAX_READBACK_BYTES)
             return out;
         auto job = std::make_unique<Readback>();
         job->bytes = desc.ByteWidth;
@@ -165,12 +225,15 @@ static std::vector<unsigned char> read(ID3D11DeviceContext *c, ID3D11Buffer *b) 
     pending.erase(found);
     return out;
 }
+
+// Creates the shared GPU objects on first use (for context `c`).
 static bool initialize(ID3D11DeviceContext *c) {
     if (device)
         return context == c && floatLayout && cloudMatrix && leafCompute && windConstants;
     context = c;
     c->GetDevice(&device);
     context->AddRef();
+    // A dummy vertex shader, only to validate the input layout signature.
     const char *hlsl =
         "struct V{float4 p:POSITION;float4 c:COLOR;};float4 main(V v):SV_POSITION{return v.p+v.c*0.00001;}";
     ID3DBlob *code = nullptr;
@@ -204,6 +267,13 @@ static bool initialize(ID3D11DeviceContext *c) {
             : "WorldMotion resource creation failed; native rendering retained.");
     return SUCCEEDED(hr);
 }
+
+// ===========================================================================
+// Mesh building
+// ===========================================================================
+
+// Creates the animated vertex buffer (with a raw UAV) and the leaf index buffer
+// for `m`, then frees the CPU copies. Meshes without leaves need nothing.
 static bool upload(Mesh &m) {
     if (m.leaves.empty())
         return true;
@@ -242,6 +312,9 @@ static bool upload(Mesh &m) {
     m.leaves.shrink_to_fit();
     return true;
 }
+
+// Every 500 ms: resets on a world change, refreshes the nearby chunk list,
+// expires unused meshes/readbacks, handles F8 and logs statistics once a minute.
 static void maintain(cube::World *w, unsigned long long now) {
     if (currentWorld != w) {
         meshes.clear();
@@ -257,14 +330,14 @@ static void maintain(cube::World *w, unsigned long long now) {
     built = 0;
     if (nativeScene::snapshot(w, chunks, leafRange + 64))
         for (auto it = meshes.begin(); it != meshes.end();) {
-            if (!chunks.count(it->first) || now - it->second->lastUsed > 3000) {
+            if (!chunks.count(it->first) || now - it->second->lastUsed > EXPIRY_MS) {
                 cacheBytes -= it->second->bytes;
                 it = meshes.erase(it);
             } else
                 ++it;
         }
     for (auto it = pending.begin(); it != pending.end();)
-        if (!chunks.count(it->first) || now - it->second->started > 3000)
+        if (!chunks.count(it->first) || now - it->second->started > EXPIRY_MS)
             it = pending.erase(it);
         else
             ++it;
@@ -290,9 +363,83 @@ static void maintain(cube::World *w, unsigned long long now) {
         lastLog = now;
     }
 }
+
+// True if the mesh corner at zone-local (vx, vy, vz) touches a solid non-leaf
+// block (or an unloaded neighbour zone) and must therefore stay still.
+static bool anchoredCorner(cube::World *w, cube::Zone *zone, const nativeScene::Chunk &info, int vx,
+                           int vy, int vz) {
+    // Every duplicate corner inspects the same eight touching voxels. Pin it
+    // when it meets a stationary surface, including across chunk boundaries.
+    for (int dx = -1; dx <= 0; dx++)
+        for (int dy = -1; dy <= 0; dy++) {
+            int lx = vx + dx, ly = vy + dy;
+            auto neighbor = zone;
+            if (lx < 0 || lx >= 64 || ly < 0 || ly >= 64) {
+                IntVector2 coords(info.zone.x + (lx < 0     ? -1
+                                                 : lx >= 64 ? 1
+                                                            : 0),
+                                  info.zone.y + (ly < 0     ? -1
+                                                 : ly >= 64 ? 1
+                                                            : 0));
+                auto found = w->zones.find(coords);
+                neighbor = found == w->zones.end() ? nullptr : found->second;
+                lx = (lx + 64) % 64;
+                ly = (ly + 64) % 64;
+            }
+            if (!neighbor)
+                return true;
+            for (int dz = -1; dz <= 0; dz++)
+                if (wind::anchorMaterial(nativeScene::blockType(neighbor, lx, ly, vz + dz)))
+                    return true;
+        }
+    return false;
+}
+
+// Marks the four vertices of every leaf face in the native vertex data.
+// Returns false if the world is busy or the chunk is no longer resident.
+static bool markLeaves(Mesh &mesh, const std::vector<unsigned char> &bytes, size_t count,
+                       ID3D11Buffer *b, cube::World *w, const nativeScene::Chunk &info) {
+    nativeScene::Locks locks(w);
+    cube::Zone *zone = nullptr;
+    if (!locks.held || !nativeScene::resident(w, info, b, zone))
+        return false;
+    const int normal[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (size_t i = 0; i < count; i += 4) {
+        // A quad: four vertices with the same face id (byte 3) 0..5.
+        int n = bytes[i * 8 + 3];
+        if (n > 5)
+            continue;
+        float center[3]{};
+        bool quad = true;
+        for (int j = 0; j < 4; j++) {
+            if (bytes[(i + j) * 8 + 3] != n)
+                quad = false;
+            for (int axis = 0; axis < 3; axis++)
+                center[axis] += bytes[(i + j) * 8 + axis] * .25f;
+        }
+        if (!quad)
+            continue;
+        // The block behind the face must be foliage.
+        int x = (int)floorf(center[0] - normal[n][0] * .25f),
+            y = (int)floorf(center[1] - normal[n][1] * .25f),
+            z = info.z + (int)floorf(center[2] - normal[n][2] * .25f);
+        int type = nativeScene::blockType(zone, x, y, z);
+        if (wind::foliage(type))
+            for (unsigned j = 0; j < 4; j++) {
+                int vx = bytes[(i + j) * 8], vy = bytes[(i + j) * 8 + 1],
+                    vz = info.z + bytes[(i + j) * 8 + 2];
+                bool anchored = anchoredCorner(w, zone, info, vx, vy, vz);
+                mesh.leaves.push_back(wind::windIndex((unsigned)i + j, anchored));
+            }
+    }
+    return true;
+}
+
+// Builds (or keeps trying to build) the mesh for native buffer `b`. Returns
+// nullptr while the readback is pending or when limits are reached.
 static Mesh *build(ID3D11DeviceContext *c, ID3D11Buffer *b, cube::World *w,
                    const nativeScene::Chunk &info) {
-    if (built >= 2 || meshes.size() >= 64)
+    if (built >= MAX_BUILDS_PER_REFRESH || meshes.size() >= MAX_MESHES)
         return nullptr;
     auto bytes = read(c, b);
     if (bytes.empty() || bytes.size() % 32)
@@ -303,69 +450,8 @@ static Mesh *build(ID3D11DeviceContext *c, ID3D11Buffer *b, cube::World *w,
     built++;
     auto mesh = std::make_unique<Mesh>();
     mesh->info = info;
-    {
-        nativeScene::Locks locks(w);
-        cube::Zone *zone = nullptr;
-        if (!locks.held || !nativeScene::resident(w, info, b, zone))
-            return nullptr;
-        const int normal[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                  {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-        for (size_t i = 0; i < count; i += 4) {
-            int n = bytes[i * 8 + 3];
-            if (n > 5)
-                continue;
-            float center[3]{};
-            bool quad = true;
-            for (int j = 0; j < 4; j++) {
-                if (bytes[(i + j) * 8 + 3] != n)
-                    quad = false;
-                for (int axis = 0; axis < 3; axis++)
-                    center[axis] += bytes[(i + j) * 8 + axis] * .25f;
-            }
-            if (!quad)
-                continue;
-            int x = (int)floorf(center[0] - normal[n][0] * .25f),
-                y = (int)floorf(center[1] - normal[n][1] * .25f),
-                z = info.z + (int)floorf(center[2] - normal[n][2] * .25f);
-            int type = nativeScene::blockType(zone, x, y, z);
-            if (wind::foliage(type))
-                for (unsigned j = 0; j < 4; j++) {
-                    int vx = bytes[(i + j) * 8], vy = bytes[(i + j) * 8 + 1],
-                        vz = info.z + bytes[(i + j) * 8 + 2];
-                    bool anchored = false;
-                    // Every duplicate corner inspects the same eight touching voxels. Pin it
-                    // when it meets a stationary surface, including across chunk boundaries.
-                    for (int dx = -1; dx <= 0 && !anchored; dx++)
-                        for (int dy = -1; dy <= 0 && !anchored; dy++) {
-                            int lx = vx + dx, ly = vy + dy;
-                            auto neighbor = zone;
-                            if (lx < 0 || lx >= 64 || ly < 0 || ly >= 64) {
-                                IntVector2 coords(info.zone.x + (lx < 0     ? -1
-                                                                 : lx >= 64 ? 1
-                                                                            : 0),
-                                                  info.zone.y + (ly < 0     ? -1
-                                                                 : ly >= 64 ? 1
-                                                                            : 0));
-                                auto found = w->zones.find(coords);
-                                neighbor = found == w->zones.end() ? nullptr : found->second;
-                                lx = (lx + 64) % 64;
-                                ly = (ly + 64) % 64;
-                            }
-                            if (!neighbor) {
-                                anchored = true;
-                                break;
-                            }
-                            for (int dz = -1; dz <= 0; dz++)
-                                if (wind::anchorMaterial(
-                                        nativeScene::blockType(neighbor, lx, ly, vz + dz))) {
-                                    anchored = true;
-                                    break;
-                                }
-                        }
-                    mesh->leaves.push_back(wind::windIndex((unsigned)i + j, anchored));
-                }
-        }
-    }
+    if (!markLeaves(*mesh, bytes, count, b, w, info))
+        return nullptr;
     // Empty meshes are cached too, so bare ground is not repeatedly read back.
     if (!mesh->leaves.empty()) {
         mesh->vertices.resize(count);
@@ -389,6 +475,14 @@ static Mesh *build(ID3D11DeviceContext *c, ID3D11Buffer *b, cube::World *w,
     meshes.emplace(b, std::move(mesh));
     return result;
 }
+
+// ===========================================================================
+// Animation and drawing
+// ===========================================================================
+
+// Runs the leaf compute shader for `m` (at most once per 33 ms tick), saving
+// and restoring the game's compute-shader bindings, and publishes the animated
+// buffer for SteamShadows.
 static bool animate(Mesh &m, ID3D11DeviceContext *c, const float *world, unsigned long long now) {
     // All visible meshes use one quantized time so shared corners agree. CPU
     // uploads remain only 48 bytes per mesh; vertex work stays on the GPU.
@@ -438,6 +532,8 @@ static bool animate(Mesh &m, ID3D11DeviceContext *c, const float *world, unsigne
     }
     return true;
 }
+
+// The native bindings a draw started with, restored afterwards if changed.
 struct Saved {
     ID3D11Buffer *vb = nullptr, *cb = nullptr;
     ID3D11InputLayout *layout = nullptr;
@@ -453,9 +549,49 @@ struct Saved {
             return;
         c->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
         c->IASetInputLayout(layout);
-        c->VSSetConstantBuffers(2, 1, &cb);
+        c->VSSetConstantBuffers(CB_WORLD, 1, &cb);
     }
 };
+
+// Cloud draw: bind a drifted copy of the world matrix (and tag the drift for
+// SteamShadows).
+static void driftCloud(ID3D11DeviceContext *c, Saved &s, float world[16], unsigned long long now) {
+    double t = (now - origin) * .001 * windSpeed * cloudSpeed;
+    auto offset = wind::cloud(t, cloudDistance);
+    world[3] += offset.x;
+    world[7] += offset.y;
+    float appliedDrift[2] = {offset.x, offset.y};
+    cloudMatrix->SetPrivateData(nativeScene::cloudDriftGuid, sizeof(appliedDrift), appliedDrift);
+    c->UpdateSubresource(cloudMatrix, 0, nullptr, world, 0, 0);
+    c->IAGetInputLayout(&s.layout);
+    c->VSSetConstantBuffers(CB_WORLD, 1, &cloudMatrix);
+    s.changed = true;
+    cloudDraws++;
+}
+
+// Terrain draw: bind the animated copy of a nearby chunk (building it first if needed).
+static void swayLeaves(ID3D11DeviceContext *c, Saved &s, cube::World *w, const float *world,
+                       unsigned long long now) {
+    auto found = chunks.find(s.vb);
+    if (found == chunks.end())
+        return;
+    auto cached = meshes.find(s.vb);
+    auto m = cached == meshes.end() ? build(c, s.vb, w, found->second) : cached->second.get();
+    if (!m)
+        return;
+    m->lastUsed = now;
+    if (m->animated && animate(*m, c, world, now)) {
+        c->IAGetInputLayout(&s.layout);
+        UINT stride = sizeof(Vertex), offset = 0;
+        c->IASetVertexBuffers(0, 1, &m->animated, &stride, &offset);
+        c->IASetInputLayout(floatLayout);
+        s.changed = true;
+        leafDraws++;
+    }
+}
+
+// Runs before every draw: classifies native world draws and swaps in moving
+// clouds or leaves. `s` records what must be restored after the draw.
 static void prepare(ID3D11DeviceContext *c, Saved &s) {
     if (internal || c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
         return;
@@ -468,6 +604,7 @@ static void prepare(ID3D11DeviceContext *c, Saved &s) {
         internal = false;
         return;
     }
+    // Native world geometry uses 8-byte vertices.
     c->IAGetVertexBuffers(0, 1, &s.vb, &s.stride, &s.offset);
     if (!s.vb || s.stride != 8 || s.offset != 0) {
         internal = false;
@@ -486,55 +623,34 @@ static void prepare(ID3D11DeviceContext *c, Saved &s) {
     }
     float world[16]{}, projection[16]{}, view[16]{};
     if (native)
-        native = readConstant(c, buffers[2], world) && readConstant(c, buffers[0], projection) &&
-                 readConstant(c, buffers[1], view);
+        native = readConstant(c, buffers[CB_WORLD], world) &&
+                 readConstant(c, buffers[CB_PROJECTION], projection) &&
+                 readConstant(c, buffers[CB_VIEW], view);
     if (native) {
-        s.cb = buffers[2];
+        s.cb = buffers[CB_WORLD];
         s.cb->AddRef();
     }
     for (auto &b : buffers)
         drop(b);
+    // Skip HUD (orthographic) and sky/preview (untranslated view) draws.
     if (!native || fabsf(projection[15]) > .5f ||
         fabsf(view[3]) + fabsf(view[7]) + fabsf(view[11]) < .01f) {
         internal = false;
         return;
     }
     bool isCloud = cloudsEnabled && nativeScene::cloud(w, s.vb);
-    if (isCloud) {
-        double t = (now - origin) * .001 * windSpeed * cloudSpeed;
-        auto offset = wind::cloud(t, cloudDistance);
-        world[3] += offset.x;
-        world[7] += offset.y;
-        float appliedDrift[2] = {offset.x, offset.y};
-        cloudMatrix->SetPrivateData(nativeScene::cloudDriftGuid, sizeof(appliedDrift),
-                                    appliedDrift);
-        c->UpdateSubresource(cloudMatrix, 0, nullptr, world, 0, 0);
-        c->IAGetInputLayout(&s.layout);
-        c->VSSetConstantBuffers(2, 1, &cloudMatrix);
-        s.changed = true;
-        cloudDraws++;
-    } else if (leavesEnabled && fabsf(world[0] - 1) < .001f && fabsf(world[5] - 1) < .001f &&
-               fabsf(world[10] - 1) < .001f) {
-        auto found = chunks.find(s.vb);
-        if (found != chunks.end()) {
-            auto cached = meshes.find(s.vb);
-            auto m =
-                cached == meshes.end() ? build(c, s.vb, w, found->second) : cached->second.get();
-            if (m) {
-                m->lastUsed = now;
-                if (m->animated && animate(*m, c, world, now)) {
-                    c->IAGetInputLayout(&s.layout);
-                    UINT stride = sizeof(Vertex), offset = 0;
-                    c->IASetVertexBuffers(0, 1, &m->animated, &stride, &offset);
-                    c->IASetInputLayout(floatLayout);
-                    s.changed = true;
-                    leafDraws++;
-                }
-            }
-        }
-    }
+    if (isCloud)
+        driftCloud(c, s, world, now);
+    else if (leavesEnabled && fabsf(world[0] - 1) < .001f && fabsf(world[5] - 1) < .001f &&
+             fabsf(world[10] - 1) < .001f)
+        swayLeaves(c, s, w, world, now);
     internal = false;
 }
+
+// ===========================================================================
+// Hooks
+// ===========================================================================
+
 static void STDMETHODCALLTYPE di(ID3D11DeviceContext *c, UINT n, UINT start, INT base) {
     Saved saved;
     prepare(c, saved);
@@ -547,6 +663,7 @@ static void STDMETHODCALLTYPE draw(ID3D11DeviceContext *c, UINT n, UINT start) {
     oldD(c, n, start);
     saved.restore(c);
 }
+// Map/Unmap/Update: remember writes to small constant buffers.
 static HRESULT STDMETHODCALLTYPE map(ID3D11DeviceContext *c, ID3D11Resource *r, UINT sub,
                                      D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE *out) {
     HRESULT hr = oldMap(c, r, sub, type, flags, out);
@@ -583,13 +700,8 @@ static bool patch(void **slot, void *fn) {
     VirtualProtect(slot, sizeof(void *), old, &unused);
     return true;
 }
-static DWORD attach() {
-    if (table)
-        return 1;
-    if (!nativeScene::supported()) {
-        log("Unsupported executable; WorldMotion disabled.");
-        return 0;
-    }
+
+static void loadSettings() {
     auto integer = [](const wchar_t *key, int value) {
         return (int)GetPrivateProfileIntW(L"Motion", key, value, L".\\Mods\\WorldMotion.ini");
     };
@@ -601,6 +713,18 @@ static DWORD attach() {
     cloudDistance = (float)std::clamp(integer(L"CloudDriftDistance", 64), 0, 128);
     windSpeed = std::clamp(integer(L"WindSpeedPercent", 100), 10, 300) * .01f;
     cloudSpeed = std::clamp(integer(L"CloudSpeedPercent", 125), 10, 300) * .01f;
+}
+
+// Reads settings and hooks the shared ID3D11DeviceContext vtable (taken from a
+// temporary device). All hooks or none. Returns 1 on success.
+static DWORD attach() {
+    if (table)
+        return 1;
+    if (!nativeScene::supported()) {
+        log("Unsupported executable; WorldMotion disabled.");
+        return 0;
+    }
+    loadSettings();
     ID3D11Device *d = nullptr;
     ID3D11DeviceContext *c = nullptr;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
@@ -612,11 +736,11 @@ static DWORD attach() {
         void *fn;
         void **old;
     };
-    Hook hooks[] = {{12, (void *)di, (void **)&oldDI},
-                    {13, (void *)draw, (void **)&oldD},
-                    {14, (void *)map, (void **)&oldMap},
-                    {15, (void *)unmap, (void **)&oldUnmap},
-                    {48, (void *)update, (void **)&oldUpdate}};
+    Hook hooks[] = {{SLOT_DRAW_INDEXED, (void *)di, (void **)&oldDI},
+                    {SLOT_DRAW, (void *)draw, (void **)&oldD},
+                    {SLOT_MAP, (void *)map, (void **)&oldMap},
+                    {SLOT_UNMAP, (void *)unmap, (void **)&oldUnmap},
+                    {SLOT_UPDATE_SUBRESOURCE, (void *)update, (void **)&oldUpdate}};
     for (auto &h : hooks)
         *h.old = v[h.slot];
     bool ok = true;
@@ -642,6 +766,11 @@ static DWORD attach() {
     return ok ? 1 : 0;
 }
 } // namespace motion
+
+// ===========================================================================
+// Entry points
+// ===========================================================================
+
 class WorldMotion : public GenericMod {
   public:
     void Initialize() override {
