@@ -92,6 +92,11 @@ static bool claim(cube::Zone *zone) {
 static void place(cube::Zone *zone) {
     if (!enabled || !zone || !zone->world || !maximum || !density || !assets(zone->world))
         return;
+    // Native meshing/rendering share these locks. Never move scenery storage
+    // while another thread is reading it, or wait on a busy generation worker.
+    nativeScene::Locks locks(zone->world);
+    if (!locks.held)
+        return;
     auto records = array(zone);
     if (!valid(records) || !claim(zone))
         return;
