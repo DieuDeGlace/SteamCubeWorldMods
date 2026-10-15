@@ -12,7 +12,8 @@ inline bool supported() {
         return false;
     auto nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
     return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.TimeDateStamp == 0x5d93ab0d &&
-           nt->OptionalHeader.SizeOfImage == 0x5b7000;
+           (nt->OptionalHeader.SizeOfImage == 0x5b7000 || // PC (SteamStub .bind section)
+            nt->OptionalHeader.SizeOfImage == 0x58a000);  // GameNative (section stripped)
 }
 inline cube::Game *game() {
     return supported() ? *(cube::Game **)((unsigned char *)GetModuleHandleW(nullptr) + 0x551a80)
