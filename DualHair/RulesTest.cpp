@@ -14,6 +14,13 @@ int main() {
     assert(!parseColor(L"#12345", c));
     assert(!parseColor(L"blue", c));
 
+    Shape look{.4f, .35f};
+    assert(parseLook(L"10,20,30", c, look) && (c == Rgb{10, 20, 30}) && look.start == .4f);
+    assert(parseLook(L"10,20,30,25,60", c, look) && fabsf(look.start - .25f) < 1e-5f && fabsf(look.blend - .6f) < 1e-5f);
+    assert(parseLook(L"#0A141E,0,0", c, look) && (c == Rgb{10, 20, 30}) && look.blend == 0);
+    assert(!parseLook(L"10,20,30,200,5", c, look));
+    assert(!parseLook(L"10,20", c, look));
+
     Shape s{.4f, .2f};
     assert(secondShare(0, s) == 0 && secondShare(.4f, s) == 0);
     assert(secondShare(.6f, s) == 1 && secondShare(1, s) == 1);
@@ -38,5 +45,27 @@ int main() {
     untint(color, {120, 40, 0});
     assert(color[0] > .79f && color[0] < .81f && color[1] > .79f && color[1] < .81f);
     assert(color[2] > .79f && color[2] < .81f);
+    // Network packing round-trips within RGB565 / eighth precision.
+    uint8_t packed[3];
+    pack({200, 100, 33}, {3 / 7.f, 5 / 7.f}, packed);
+    Rgb back;
+    Shape shapeBack;
+    assert(unpack(packed, back, shapeBack));
+    assert(abs(back.r - 200) <= 8 && abs(back.g - 100) <= 4 && abs(back.b - 33) <= 8);
+    assert(abs(shapeBack.start - 3 / 7.f) < 1e-4f && abs(shapeBack.blend - 5 / 7.f) < 1e-4f);
+    pack({255, 255, 255}, {1, 1}, packed);
+    assert(unpack(packed, back, shapeBack) && (back == Rgb{255, 255, 255}));
+    pack({0, 0, 0}, {0, 0}, packed);
+    assert(unpack(packed, back, shapeBack) && (back == Rgb{0, 0, 0}));
+    // Untagged bytes (native alpha 0 or 255, zero padding) mean one colour.
+    const uint8_t none[3] = {0, 0, 0}, opaque[3] = {255, 0, 0}, other[3] = {0x40, 1, 2};
+    assert(!unpack(none, back, shapeBack) && !unpack(opaque, back, shapeBack));
+    assert(!unpack(other, back, shapeBack));
+
+    // Palette matches the native board: pure red top-left at row 3, darker above.
+    assert((paletteColor(0, 3) == Rgb{255, 0, 0}));
+    assert((paletteColor(0, 0) == Rgb{51, 0, 0}));
+    assert((paletteColor(15, 3) == Rgb{127, 127, 127}));
+    assert((paletteColor(10, 6) == Rgb{191, 191, 255}));
     puts("DualHair rules PASS");
 }
