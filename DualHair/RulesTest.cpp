@@ -67,5 +67,7 @@ int main() {
     assert((paletteColor(0, 0) == Rgb{51, 0, 0}));
     assert((paletteColor(15, 3) == Rgb{127, 127, 127}));
     assert((paletteColor(10, 6) == Rgb{191, 191, 255}));
+    assert(markerVoxel({255, 0, 0}) && markerVoxel({0, 255, 0}) && markerVoxel({0, 0, 255}));
+    assert(!markerVoxel({254, 0, 0}) && !markerVoxel({255, 255, 255}));
     puts("DualHair rules PASS");
 }

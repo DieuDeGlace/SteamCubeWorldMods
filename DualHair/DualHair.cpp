@@ -30,6 +30,7 @@ constexpr size_t QUEUE_MODEL = 0xee2f0;
 constexpr size_t SPRITE_COPY = 0x16e790; // Sprite::Sprite(const Sprite &)
 constexpr size_t SPRITE_MESH = 0x170700; // Sprite::BuildMesh(this, 0); replaces its buffers
 constexpr size_t SPRITE_VTABLE = 0x44e790;
+constexpr size_t VOXEL_MARKER = 0x16f230; // bool(void *, const Rgb *, bool primaries off)
 constexpr size_t GAME_NEW = 0x392bac; // operator new used by the native scalar deleter
 constexpr size_t SPRITE_SIZE = 0xa8;
 // Sprite fields: voxel colours (3 bytes each, x fastest, then y, then z) and size.
@@ -179,6 +180,15 @@ struct Clone {
 };
 static std::vector<Clone> clones;
 
+// Voxels the native mesher treats specially (empty, or a marker colour with the
+// sprite's own marker setting) keep their exact colour and do not count as hair.
+static bool specialVoxel(void *sprite, Rgb v) {
+    using Marker = bool (*)(void *, const uint8_t *, bool);
+    const uint8_t bytes[3] = {v.r, v.g, v.b};
+    return emptyVoxel(v) || markerVoxel(v) ||
+           ((Marker)(base() + VOXEL_MARKER))(nullptr, bytes, field<bool>(sprite, 0x99));
+}
+
 static void recolor(void *sprite, Rgb first, const Look &look) {
     int sx = field<int>(sprite, SPRITE_SIZE_X), sy = field<int>(sprite, SPRITE_SIZE_Y),
         sz = field<int>(sprite, SPRITE_SIZE_Z);
@@ -187,7 +197,7 @@ static void recolor(void *sprite, Rgb first, const Look &look) {
     for (int z = 0; z < sz; z++)
         for (int i = 0; i < sx * sy; i++) {
             auto v = voxels + 3 * ((size_t)z * sx * sy + i);
-            if (!emptyVoxel({v[0], v[1], v[2]})) {
+            if (!specialVoxel(sprite, {v[0], v[1], v[2]})) {
                 top = std::max(top, z);
                 bottom = std::min(bottom, z);
             }
@@ -200,7 +210,7 @@ static void recolor(void *sprite, Rgb first, const Look &look) {
         for (int i = 0; i < sx * sy; i++) {
             auto v = voxels + 3 * ((size_t)z * sx * sy + i);
             Rgb voxel{v[0], v[1], v[2]};
-            if (emptyVoxel(voxel))
+            if (specialVoxel(sprite, voxel))
                 continue;
             auto out = shadeVoxel(voxel, first, look.second, share);
             v[0] = out.r, v[1] = out.g, v[2] = out.b;
@@ -599,11 +609,13 @@ static bool install() {
     static const unsigned char copyPrologue[] = {0x4c, 0x8b, 0xdc, 0x49, 0x89, 0x4b, 0x08, 0x55};
     static const unsigned char meshPrologue[] = {0x48, 0x8b, 0xc4, 0x55, 0x56, 0x57, 0x41, 0x54};
     static const unsigned char newPrologue[] = {0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b};
+    static const unsigned char markerPrologue[] = {0x45, 0x33, 0xc9, 0x4c, 0x8d, 0x1d};
     if (memcmp(site - 14, expected, sizeof expected) ||
         memcmp(base() + 0x280f2, hairSprite, sizeof hairSprite) ||
         memcmp(base() + SPRITE_COPY, copyPrologue, sizeof copyPrologue) ||
         memcmp(base() + SPRITE_MESH, meshPrologue, sizeof meshPrologue) ||
-        memcmp(base() + GAME_NEW, newPrologue, sizeof newPrologue)) {
+        memcmp(base() + GAME_NEW, newPrologue, sizeof newPrologue) ||
+        memcmp(base() + VOXEL_MARKER, markerPrologue, sizeof markerPrologue)) {
         log("Native hair draw does not match the inspected build (or another mod changed it); "
             "DualHair is off.");
         return false;

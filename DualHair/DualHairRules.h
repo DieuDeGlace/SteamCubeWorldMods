@@ -154,6 +154,11 @@ inline Rgb paletteColor(int column, int row) {
 inline bool emptyVoxel(Rgb v) {
     return v.r == 0 && v.g == 0 && v.b == 0;
 }
+// Pure red, green and blue voxels are markers the native mesher does not draw
+// as hair (for example the face cut-out); they must stay exactly as they are.
+inline bool markerVoxel(Rgb v) {
+    return (v == Rgb{255, 0, 0}) || (v == Rgb{0, 255, 0}) || (v == Rgb{0, 0, 255});
+}
 
 // Removes the native hair tint from a final model colour. A zero hair channel
 // leaves no information, so it uses the mean of the recoverable channels.
