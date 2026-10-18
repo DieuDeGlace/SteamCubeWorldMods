@@ -11,8 +11,7 @@
 // model draw.
 //
 // GUI: a "Hair color 2" board drawn with the native widget text/rectangle
-// calls beside the character-creation panel, and beside the in-game character
-// panel. Multiplayer: the look is packed into three appearance bytes that the
+// calls beside the character-creation panel (in game: /hair2). Multiplayer: the look is packed into three appearance bytes that the
 // game sends raw and never renders (see DualHairRules.h).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -42,8 +41,7 @@ constexpr size_t CREATURE_HAIR_COLOR = 0x7a, CREATURE_SPARE = 0x7d;
 constexpr size_t GAME_POINTER = 0x551a80, CHAT_PRINT = 0x26bf10;
 // Widgets: class vtables (Draw is slot 1), native draw/size/mouse helpers and
 // BaseWidget text state (font size, outline, fill/outline colour, alignment).
-constexpr size_t STYLE_WIDGET_VTABLE = 0x46dbe8, CHARACTER_WIDGET_VTABLE = 0x46dfc0;
-constexpr size_t STYLE_WIDGET_DRAW = 0x271030, CHARACTER_WIDGET_DRAW = 0x273380;
+constexpr size_t STYLE_WIDGET_VTABLE = 0x46dbe8, STYLE_WIDGET_DRAW = 0x271030;
 constexpr size_t WIDGET_SIZE = 0x32a110, WIDGET_MOUSE = 0x32b180, WIDGET_TEXT = 0x269210;
 constexpr size_t WIDGET_RENDERER = 0x8, WIDGET_FONT = 0x1a8, WIDGET_NODE = 0x178;
 constexpr size_t TEXT_STATE = 0x1b0, TEXT_STATE_SIZE = 0x38;
@@ -60,7 +58,7 @@ using GameNew = void *(*)(size_t);
 using WidgetDraw = void (*)(void *);
 
 static const wchar_t *INI = L".\\Mods\\DualHair.ini";
-static bool enabled = true, network = true, inventoryPanel = true;
+static bool enabled = true, network = true;
 static Shape defaults;
 static float offsetX = 0, offsetY = 0;
 static void *creatureSlot = nullptr; // Filled by the stub: r14 (renderer state; [r14] = creature).
@@ -125,7 +123,6 @@ static bool pendingThisSession = false;
 static void loadSettings() {
     enabled = GetPrivateProfileIntW(L"DualHair", L"Enabled", 1, INI) != 0;
     network = GetPrivateProfileIntW(L"DualHair", L"Multiplayer", 1, INI) != 0;
-    inventoryPanel = GetPrivateProfileIntW(L"DualHair", L"InventoryPanel", 1, INI) != 0;
     defaults.start =
         std::clamp((int)GetPrivateProfileIntW(L"DualHair", L"StartPercent", 40, INI), 0, 100) * .01f;
     defaults.blend =
@@ -369,7 +366,7 @@ static void tick() {
 struct V2 {
     float x, y;
 };
-enum Action { NONE, TOGGLE, START_DOWN, START_UP, BLEND_DOWN, BLEND_UP, CELL, COLLAPSE };
+enum Action { NONE, TOGGLE, START_DOWN, START_UP, BLEND_DOWN, BLEND_UP, CELL };
 struct Hit {
     float x0, y0, x1, y1;
     Action action;
@@ -450,27 +447,23 @@ static void frame(void *widget, V2 o, float x, float y, float w, float h) {
     fill(widget, o, x + w - 3, y + 3, 2, h - 6, white);
 }
 
-constexpr float PANEL_W = 300, PANEL_H = 330, HEADER_H = 40;
+constexpr float PANEL_W = 300, PANEL_H = 330;
 
-static void drawPanel(void *widget, bool creation) {
+// The Hair color 2 board beside the character creation style panel. (In game
+// the look is changed with /hair2; the board is not drawn on the inventory.)
+static void drawPanel(void *widget) {
     V2 o = widgetOrigin(widget);
     V2 size{}, mouse{};
     using Size = V2 *(*)(void *, V2 *);
     ((Size)(base() + WIDGET_SIZE))(widget, &size);
     ((Size)(base() + WIDGET_MOUSE))(widget, &mouse);
     float px = size.x + 10 + offsetX;
-    float py = (creation ? size.y - PANEL_H : 0) + offsetY;
+    float py = size.y - PANEL_H + offsetY;
 
     // The look being edited.
-    auto self = player();
-    std::string name = creation || !self ? std::string() : nameOf(self);
-    Look look = creation ? creationLook : Look{{40, 110, 200}, defaults};
-    bool on = creation ? creationOn : false;
-    if (!creation)
-        if (auto saved = lookFor(name))
-            look = *saved, on = true;
-    Rgb first = creation ? field<Rgb>(widget, STYLE_CURRENT_HAIR)
-                         : self ? field<Rgb>(self, CREATURE_HAIR_COLOR) : Rgb{255, 255, 255};
+    Look look = creationLook;
+    bool on = creationOn;
+    Rgb first = field<Rgb>(widget, STYLE_CURRENT_HAIR);
 
     auto saved = std::vector<unsigned char>(TEXT_STATE_SIZE);
     memcpy(saved.data(), (unsigned char *)widget + TEXT_STATE, TEXT_STATE_SIZE);
@@ -478,16 +471,9 @@ static void drawPanel(void *widget, bool creation) {
     auto hit = [&](float x, float y, float w, float h, Action a, int arg = 0) {
         hits.push_back({px + x, py + y, px + x + w, py + y + h, a, arg});
     };
-    bool expanded = creation || inventoryPanel;
-    float height = expanded ? PANEL_H : HEADER_H;
-    frame(widget, o, px, py, PANEL_W, height);
-    if (!creation) {
-        text(widget, L"HAIR COLOR 2", px + PANEL_W * .5f, py + 22, 1);
-        arrow(widget, o, px + 270, py + 21, !expanded);
-        hit(0, 0, PANEL_W, HEADER_H, COLLAPSE);
-    }
-    if (expanded) {
-        float row = creation ? 27.f : 57.f;
+    frame(widget, o, px, py, PANEL_W, PANEL_H);
+    {
+        float row = 27.f;
         auto option = [&](const wchar_t *label, const std::wstring &value, Action down, Action up) {
             text(widget, label, px + 15, py + row, 0);
             text(widget, value.c_str(), px + 205, py + row, 1);
@@ -543,45 +529,29 @@ static void drawPanel(void *widget, bool creation) {
             look.second = paletteColor(h.arg / 8, h.arg % 8);
             on = true;
             break;
-        case COLLAPSE:
-            inventoryPanel = !inventoryPanel;
-            WritePrivateProfileStringW(L"DualHair", L"InventoryPanel", inventoryPanel ? L"1" : L"0", INI);
-            break;
         default: break;
         }
-        if (h.action != COLLAPSE) {
-            if (creation) {
-                creationLook = look;
-                creationOn = on;
-                saveLook(PENDING, on ? &look : nullptr);
-                pendingThisSession = true;
-            } else if (!name.empty()) {
-                saveLook(name, on ? &look : nullptr);
-            }
-        }
+        creationLook = look;
+        creationOn = on;
+        saveLook(PENDING, on ? &look : nullptr);
+        pendingThisSession = true;
     }
     mouseWasDown = down;
     panel.widget = widget;
     panel.hits = std::move(hits);
     panel.hovered = hovered;
     panel.drawn = GetTickCount64();
-    if (creation)
-        creationSeen = panel.drawn;
+    creationSeen = panel.drawn;
 }
 static bool hoveringPanel() {
     return panel.hovered >= 0 && GetTickCount64() - panel.drawn < 250;
 }
 
-static WidgetDraw styleDraw = nullptr, characterDraw = nullptr;
+static WidgetDraw styleDraw = nullptr;
 static void drawStyleWidget(void *widget) {
     styleDraw(widget);
     if (enabled)
-        drawPanel(widget, true);
-}
-static void drawCharacterWidget(void *widget) {
-    characterDraw(widget);
-    if (enabled)
-        drawPanel(widget, false);
+        drawPanel(widget);
 }
 static bool hookDraw(size_t vtable, size_t expected, void *hook, WidgetDraw &original) {
     auto slot = (void **)(base() + vtable) + 1;
@@ -691,8 +661,8 @@ static bool chat(const std::wstring &message) {
                        wide(name).c_str(), look.second.r, look.second.g, look.second.b,
                        (int)std::lround(look.shape.start * 100), (int)std::lround(look.shape.blend * 100));
         else
-            swprintf_s(textBuffer, L"DualHair: off for %ls. Use the Hair color 2 board next to the "
-                                   L"character panel, or /hair2 R G B.",
+            swprintf_s(textBuffer, L"DualHair: off for %ls. Use /hair2 R G B (or the Hair color 2 "
+                                   L"board at character creation).",
                        wide(name).c_str());
         say(textBuffer);
         return true;
@@ -736,12 +706,9 @@ class DualHair : public GenericMod {
             return;
         bool style = dualhair::hookDraw(dualhair::STYLE_WIDGET_VTABLE, dualhair::STYLE_WIDGET_DRAW,
                                         (void *)&dualhair::drawStyleWidget, dualhair::styleDraw);
-        bool character = dualhair::hookDraw(
-            dualhair::CHARACTER_WIDGET_VTABLE, dualhair::CHARACTER_WIDGET_DRAW,
-            (void *)&dualhair::drawCharacterWidget, dualhair::characterDraw);
         char line[200];
-        sprintf_s(line, "DualHair attached to the native hair draw (creation board %s, in-game board %s).",
-                  style ? "on" : "unavailable", character ? "on" : "unavailable");
+        sprintf_s(line, "DualHair attached to the native hair draw (creation board %s).",
+                  style ? "on" : "unavailable");
         dualhair::log(line);
     }
     void OnGameTick(cube::Game *) override {
