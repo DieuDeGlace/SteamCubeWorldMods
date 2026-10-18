@@ -26,7 +26,7 @@ Each hairstyle and colour pair is built once and cached. A copy that has gone un
 
 The preview character updates as you click. The look is saved for the new character when you enter the world.
 
-**In game:** the same board sits beside the character panel. Click its header to fold it away; that choice is remembered as `InventoryPanel`. If the board overlaps something, `PanelOffsetX`/`PanelOffsetY` move it.
+**In game:** use `/hair2` (below); the board is only shown at character creation, never on the inventory screen. If the board overlaps something, `PanelOffsetX`/`PanelOffsetY` move it.
 
 Both boards are drawn with the game's own widget text and rectangle calls. Clicks on the board are not passed to the game.
 
