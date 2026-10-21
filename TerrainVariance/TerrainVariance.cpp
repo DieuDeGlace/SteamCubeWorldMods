@@ -130,7 +130,7 @@ static int fromSurface(cube::World *w, int64_t x, int64_t y, float native) {
                                                                                &location);
     if (mountainLocationType && location.type == mountainLocationType && location.influence > 0)
         added = terrain::mountainRelief(added, mountainAmplitude, location.influence);
-    return terrain::surfaceOffset(native, added);
+    return terrain::landOffset(native, added);
 }
 
 // Offset for a column outside the zone being processed. Special height modes
@@ -455,7 +455,7 @@ static void install() {
         return;
     }
     if (!matches(BUILD_BOUNDS_RVA, "48895c242056574154415641574883ec40") ||
-        !matches(BUILD_OCCUPANCY_RVA, "555356574156488d6c24c94881ece0000000")) {
+        !matches(BUILD_OCCUPANCY_RVA, "40555356574156488d6c24c94881ece0000000")) {
         log("Object cache builders differ; terrain disabled.");
         return;
     }
@@ -481,7 +481,7 @@ static void install() {
     for (auto &h : hooks)
         patch(h);
     installed = true;
-    log("TerrainVariance column alignment enabled; native generation preserved, complete columns and water ceiling translated, all height modes uniform; API 7.3.");
+    log("TerrainVariance column alignment enabled; native water and shore columns preserved, inland terrain translated, all height modes uniform; API 7.3.");
 }
 
 // --- Read-only diagnostics (exported below) ---------------------------------
